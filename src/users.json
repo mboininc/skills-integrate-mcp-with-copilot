@@ -1,0 +1,24 @@
+{
+  "users": {
+    "admin@mergington.edu": {
+      "password": "admin123",
+      "role": "admin",
+      "full_name": "Administrator"
+    },
+    "teacher@mergington.edu": {
+      "password": "teacher123",
+      "role": "faculty",
+      "full_name": "Ms. Johnson"
+    },
+    "clubhead@mergington.edu": {
+      "password": "clubhead123",
+      "role": "club_head",
+      "full_name": "Club President"
+    },
+    "student@mergington.edu": {
+      "password": "student123",
+      "role": "student",
+      "full_name": "John Student"
+    }
+  }
+}
