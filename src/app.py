@@ -5,11 +5,15 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 import os
 from pathlib import Path
+import json
+from typing import Optional
+from datetime import datetime, timedelta
+import secrets
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -18,6 +22,37 @@ app = FastAPI(title="Mergington High School API",
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Session management
+sessions = {}  # {token: {"email": "...", "role": "...", "expires": datetime}}
+
+# Load users from JSON file
+def load_users():
+    users_file = os.path.join(Path(__file__).parent, "users.json")
+    with open(users_file, "r") as f:
+        return json.load(f)["users"]
+
+# Authentication helper
+def get_current_user(auth_token: Optional[str] = Cookie(None)):
+    """Validate session token and return user info"""
+    if not auth_token or auth_token not in sessions:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    session_data = sessions[auth_token]
+    if datetime.now() > session_data["expires"]:
+        del sessions[auth_token]
+        raise HTTPException(status_code=401, detail="Session expired")
+    
+    return session_data
+
+# Role-based access control
+def require_role(*allowed_roles):
+    """Decorator to check if user has required role"""
+    def role_checker(user = Depends(get_current_user)):
+        if user["role"] not in allowed_roles:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return user
+    return role_checker
 
 # In-memory activity database
 activities = {
@@ -83,20 +118,110 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+# Authentication Endpoints
+@app.post("/auth/login")
+def login(email: str, password: str):
+    """Login endpoint"""
+    users = load_users()
+    
+    if email not in users:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    user = users[email]
+    if user["password"] != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Create session token
+    token = secrets.token_urlsafe(32)
+    sessions[token] = {
+        "email": email,
+        "role": user["role"],
+        "full_name": user["full_name"],
+        "expires": datetime.now() + timedelta(hours=24)
+    }
+    
+    response = JSONResponse({
+        "message": "Logged in successfully",
+        "user": {
+            "email": email,
+            "role": user["role"],
+            "full_name": user["full_name"]
+        }
+    })
+    response.set_cookie("auth_token", token, httponly=True, max_age=86400)
+    return response
+
+
+@app.post("/auth/logout")
+def logout(user = Depends(get_current_user)):
+    """Logout endpoint"""
+    # Find and delete the user's session
+    for token, session in list(sessions.items()):
+        if session["email"] == user["email"]:
+            del sessions[token]
+            break
+    
+    response = JSONResponse({"message": "Logged out successfully"})
+    response.delete_cookie("auth_token")
+    return response
+
+
+@app.post("/auth/register")
+def register(email: str, password: str, full_name: str):
+    """Register a new student account"""
+    users = load_users()
+    
+    if email in users:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Add new user with student role
+    users[email] = {
+        "password": password,
+        "role": "student",
+        "full_name": full_name
+    }
+    
+    # Save updated users to file
+    users_file = os.path.join(Path(__file__).parent, "users.json")
+    with open(users_file, "w") as f:
+        json.dump({"users": users}, f, indent=2)
+    
+    return {"message": "Registration successful. Please log in."}
+
+
+@app.get("/auth/me")
+def get_me(user = Depends(get_current_user)):
+    """Get current user information"""
+    return {
+        "email": user["email"],
+        "role": user["role"],
+        "full_name": user["full_name"]
+    }
+
+
 @app.get("/activities")
-def get_activities():
+def get_activities(user: Optional[dict] = None):
+    """Get all activities - public endpoint"""
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
-    """Sign up a student for an activity"""
+def signup_for_activity(activity_name: str, email: str, user = Depends(get_current_user)):
+    """Sign up a student for an activity (authentication required)"""
+    # Only students and club heads can sign up
+    if user["role"] not in ["student", "club_head"]:
+        raise HTTPException(status_code=403, detail="Only students can sign up")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
 
     # Get the specific activity
     activity = activities[activity_name]
+    
+    # Check if activity is full
+    if len(activity["participants"]) >= activity["max_participants"]:
+        raise HTTPException(status_code=400, detail="Activity is full")
 
     # Validate student is not already signed up
     if email in activity["participants"]:
@@ -111,8 +236,12 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
-    """Unregister a student from an activity"""
+def unregister_from_activity(activity_name: str, email: str, user = Depends(get_current_user)):
+    """Unregister a student from an activity (authentication required)"""
+    # Faculty and Admins can unregister anyone, others only themselves
+    if user["role"] not in ["faculty", "admin"] and user["email"] != email:
+        raise HTTPException(status_code=403, detail="Cannot unregister others")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
